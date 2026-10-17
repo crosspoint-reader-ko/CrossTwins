@@ -1,24 +1,23 @@
-name: Compile Release (crosspoint-reader-ko)
+name: Compile Release (publish)
 
-# Flashable builds for the crosspoint-reader-ko fork, same layout as the Korean firmware
-# repo (crosspoint-reader-ko/crosspoint-reader-ko release.yml). Pushing a tag
-#   v<platformio version>-ct.<N>-<7-char short SHA of the tagged commit>
-# builds every board and creates a GitHub release with all assets. The firmware reports
-# <version>-ct.<N>+<sha> (the *_rc envs), so it never looks newer than upstream ct.<N>.
+# Tag-driven release that builds every board and publishes the assets, so X4 Pro and
+# the other S3 boards get images next to X3/X4. release.yml stays the no-publication
+# preflight.
 #
-# This does not replace release.yml (meat-holic/CrossTwins preflight). Devices still
-# check meat-holic/CrossTwins for OTA (lib/JsonParser/ReleaseJsonParser.h); these
-# releases are for flashing.
+# Tags:
+#   v<platformio version>-ct.<N>            regular release
+#   v<platformio version>-ct.<N>-<short sha> test build of that commit (pre-release)
+# The firmware reports <version>-ct.<N>+<sha> (the *_rc envs) either way.
 #
 # Assets per board (device = x3-x4 | sticky | x4pro | x4c | papermono):
-#   crosspoint-<ver>-<device>.bin      - app image (OTA slot / SD update)
+#   crosspoint-<ver>-<device>.bin      - app image (OTA slot / SD update; the name OTA looks up)
 #   CrossPoint-<tag>-<device>-full.bin - merged full-flash image (bootloader+partitions+app)
 # X3/X4 also: firmware.bin, bootloader.bin, partitions.bin
 
 on:
   push:
     tags:
-      - 'v*-ct.*-*'
+      - 'v*-ct.*'
 
 permissions:
   contents: read
@@ -29,6 +28,8 @@ jobs:
     outputs:
       suffix: ${{ steps.v.outputs.suffix }}
       sha: ${{ steps.v.outputs.sha }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      notes: ${{ steps.v.outputs.notes }}
     steps:
       - uses: actions/checkout@v6
       - id: v
@@ -36,18 +37,24 @@ jobs:
           set -euo pipefail
           base="$(sed -n 's/^version = //p' platformio.ini | head -n1)"
           sha="$(git rev-parse --short=7 HEAD)"
-          if [[ ! "$GITHUB_REF_NAME" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-ct\.([1-9][0-9]*)-([0-9a-f]{7})$ ]]; then
-            echo "::error::Tag $GITHUB_REF_NAME must look like v${base}-ct.N-${sha}"
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-ct\.([1-9][0-9]*)(-([0-9a-f]{7}))?$ ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME must look like v${base}-ct.N or v${base}-ct.N-${sha}"
             exit 1
           fi
           if [ "${BASH_REMATCH[1]}" != "$base" ]; then
             echo "::error::Tag version ${BASH_REMATCH[1]} does not match platformio.ini $base"
             exit 1
           fi
-          if [ "${BASH_REMATCH[3]}" != "$sha" ]; then
-            echo "::error::Tag SHA ${BASH_REMATCH[3]} does not match the tagged commit $sha"
-            exit 1
+          prerelease=false
+          if [ -n "${BASH_REMATCH[4]}" ]; then
+            if [ "${BASH_REMATCH[4]}" != "$sha" ]; then
+              echo "::error::Tag SHA ${BASH_REMATCH[4]} does not match the tagged commit $sha"
+              exit 1
+            fi
+            prerelease=true
           fi
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "notes=docs/release-notes/v${base}-ct.${BASH_REMATCH[2]}.ko.md" >> "$GITHUB_OUTPUT"
           echo "suffix=-ct.${BASH_REMATCH[2]}" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "### firmware version ${base}-ct.${BASH_REMATCH[2]}+${sha}" >> "$GITHUB_STEP_SUMMARY"
@@ -168,7 +175,7 @@ jobs:
             ${{ env.BUILD_DIR }}/firmware.map
 
   publish-release:
-    needs: build-release
+    needs: [version, build-release]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -204,8 +211,7 @@ jobs:
       - name: Resolve release notes
         id: notes
         run: |
-          # The tag carries the commit's SHA, so the notes are named without it.
-          NOTES="docs/release-notes/${GITHUB_REF_NAME%-*}.ko.md"
+          NOTES="${{ needs.version.outputs.notes }}"
           if [[ -f "$NOTES" ]]; then
             echo "path=$NOTES" >> "$GITHUB_OUTPUT"
             echo "generate=false" >> "$GITHUB_OUTPUT"
@@ -221,4 +227,4 @@ jobs:
           body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: ${{ steps.notes.outputs.generate }}
           draft: false
-          prerelease: true
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
